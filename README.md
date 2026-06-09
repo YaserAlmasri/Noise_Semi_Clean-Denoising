@@ -1,4 +1,4 @@
-# SVD-Guided Signal Denoising
+# SVD-Guided Signal Denoising (Noise2Semi_clean Framework)
 
 A PyTorch-based signal denoising framework using SVD (Singular Value Decomposition) to generate semi-clean training targets. This approach eliminates the need for ground truth clean signals during training.
 
