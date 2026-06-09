@@ -116,59 +116,77 @@ class UNet(nn.Module):
         # Leaky ReLU activation
         self.leaky_relu = nn.LeakyReLU(0.1)
     
+    @staticmethod
+    def _center_crop(tensor, target_h, target_w):
+        """Center-crop tensor to (target_h, target_w) in spatial dims."""
+        _, _, h, w = tensor.size()
+        dh = (h - target_h) // 2
+        dw = (w - target_w) // 2
+        return tensor[:, :, dh:dh + target_h, dw:dw + target_w]
+
     def forward(self, x):
-        # Input: (batch, 2, H, W) - channels first for PyTorch
+        # Input: (batch, C, H, W) - channels first for PyTorch
+        orig_h, orig_w = x.shape[2], x.shape[3]
         
-        # Pad to make divisible by 16 (for 4 pooling layers)
-        # Original size is 78x78, pad to 80x80
-        x = F.pad(x, (1, 1, 1, 1))  # pad: (left, right, top, bottom)
+        # Dynamically pad to the nearest multiple of 16 (for 4 pooling layers)
+        divisor = 16
+        pad_h = (divisor - orig_h % divisor) % divisor
+        pad_w = (divisor - orig_w % divisor) % divisor
+        if pad_h > 0 or pad_w > 0:
+            # Pad: (left, right, top, bottom)
+            x = F.pad(x, (0, pad_w, 0, pad_h))
         
-        # Encoder Block 1: 80x80 -> 40x40
+        # Encoder Block 1
         enc1 = self.leaky_relu(self.enc1_conv(x))
         pool1 = self.pool1(enc1)
         
-        # Encoder Block 2: 40x40 -> 20x20
+        # Encoder Block 2
         enc2 = self.leaky_relu(self.enc2_conv(pool1))
         pool2 = self.pool2(enc2)
         
-        # Encoder Block 3: 20x20 -> 10x10
+        # Encoder Block 3
         enc3 = self.leaky_relu(self.enc3_conv(pool2))
         pool3 = self.pool3(enc3)
         
-        # Encoder Block 4: 10x10 -> 5x5
+        # Encoder Block 4
         enc4 = self.leaky_relu(self.enc4_conv(pool3))
         pool4 = self.pool4(enc4)
         
-        # Bottleneck: 5x5
+        # Bottleneck
         bottleneck = self.leaky_relu(self.bottleneck_conv(pool4))
         
-        # Decoder Block 1: 5x5 -> 10x10
+        # Decoder Block 1
         up1 = self.leaky_relu(self.up1(bottleneck))
+        # Crop skip connection to match upsampled size if needed
+        enc4 = self._center_crop(enc4, up1.shape[2], up1.shape[3])
         up1 = torch.cat([up1, enc4], dim=1)
         dec1 = self.leaky_relu(self.dec1_conv(up1))
         dec1 = self.dropout1(dec1)
         
-        # Decoder Block 2: 10x10 -> 20x20
+        # Decoder Block 2
         up2 = self.leaky_relu(self.up2(dec1))
+        enc3 = self._center_crop(enc3, up2.shape[2], up2.shape[3])
         up2 = torch.cat([up2, enc3], dim=1)
         dec2 = self.leaky_relu(self.dec2_conv(up2))
         dec2 = self.dropout2(dec2)
         
-        # Decoder Block 3: 20x20 -> 40x40
+        # Decoder Block 3
         up3 = self.leaky_relu(self.up3(dec2))
+        enc2 = self._center_crop(enc2, up3.shape[2], up3.shape[3])
         up3 = torch.cat([up3, enc2], dim=1)
         dec3 = self.leaky_relu(self.dec3_conv(up3))
         
-        # Decoder Block 4: 40x40 -> 80x80
+        # Decoder Block 4
         up4 = self.leaky_relu(self.up4(dec3))
+        enc1 = self._center_crop(enc1, up4.shape[2], up4.shape[3])
         up4 = torch.cat([up4, enc1], dim=1)
         dec4 = self.leaky_relu(self.dec4_conv(up4))
         
         # Output (linear activation for regression)
         output = self.output_conv(dec4)
         
-        # Crop back to original size (80 -> 78)
-        output = output[:, :, 1:-1, 1:-1]
+        # Crop back to original input size
+        output = output[:, :, :orig_h, :orig_w]
         
         return output
 
@@ -362,7 +380,8 @@ def predict_and_reconstruct(model, X_test, device, batch_size=64):
 # =============================================================================
 def train_model(model, optimizer, X_train, y_train, X_val, y_val, device,
                 epochs=30, batch_size=128, patience=10,
-                checkpoint_path='checkpoints/best_model.pth'):
+                checkpoint_path='checkpoints/best_model.pth',
+                mse_weight=0.9, l1_weight=0.1):
     """
     Train the U-Net model with early stopping and checkpoint saving.
     
@@ -378,7 +397,9 @@ def train_model(model, optimizer, X_train, y_train, X_val, y_val, device,
         batch_size: Training batch size
         patience: Early stopping patience
         checkpoint_path: Path to save best model checkpoint
-        
+        mse_weight: Weight for MSE loss term (default 0.9)
+        l1_weight: Weight for L1 regularization term (default 0.1)
+    
     Returns:
         Training history
     """
@@ -420,7 +441,7 @@ def train_model(model, optimizer, X_train, y_train, X_val, y_val, device,
             
             optimizer.zero_grad()
             output = model(X_batch)
-            loss = custom_loss(output, y_batch)
+            loss = custom_loss(output, y_batch, mse_weight=mse_weight, l1_weight=l1_weight)
             loss.backward()
             optimizer.step()
             
@@ -436,7 +457,7 @@ def train_model(model, optimizer, X_train, y_train, X_val, y_val, device,
                 y_batch = torch.tensor(y_val[i:i+batch_size], dtype=torch.float32).to(device)
                 
                 output = model(X_batch)
-                loss = custom_loss(output, y_batch)
+                loss = custom_loss(output, y_batch, mse_weight=mse_weight, l1_weight=l1_weight)
                 val_losses.append(loss.item())
         
         avg_train_loss = np.mean(train_losses)
